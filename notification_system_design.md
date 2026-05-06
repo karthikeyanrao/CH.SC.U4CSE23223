@@ -276,3 +276,37 @@ function process_dlq_entry(entry):
     alert_ops_team(entry)
 
 ```
+
+---
+
+#### Stage 6: Priority Inbox Implementation
+
+### Priority Determination Approach
+Each notification gets a score on two criteria when creating the Priority Inbox:
+
+**Weight** – a numerical rank for notifications, for the purpose of establishing hierarchy:
+   - `Placement` = 3
+   - `Result` = 2  
+   - `Event` = 1
+
+**Recency** — The `Timestamp` field converted to a unix epoch integer, meaning that the newer the notification the better.
+
+The priority for the combined is a tuple, `(Weight, Recency)`. Tuples are compared in order of weight first, and then in the order they've been added to the list (recency).
+
+### Maintaining the Top N Efficiently
+If the entire dataset was sorted each time a new notification was received, this would be a $O(N \log N)$ operation per update, which is not feasible for a real-time stream.
+
+Rather, a Min-Heap of fixed size $k$ (default `k = 10`) is kept:
+In the heap root there is always the lowest-priority of the current top-k.
+- On receiving a new notification, its score is compared to the root.
+- If it's higher, it pops the root and pushes the new notification.
+- The cost of each insertion is O(log k). This is effectively constant time, and is a good option for high throughput streams, because $k$ is a small constant (10, 15 or 20).
+
+### Implementation
+The answer code is in Python (priority_inbox.py):
+- Receives real-time notifications from the given Notification API.
+- Computes a (weight, recency) priority-tuple for each notification.
+Maintains top-k heap in-memory (no database needed) using Python built-in module heapq.
+Structured logging is added for observability (fetch status, count, and result confirmation).
+## Output 
+![Priority Inbox Output](Stage6_output.png)
