@@ -1,4 +1,4 @@
-import { Log } from '../logging middleware/index';
+import { Log } from '../logging_middleware/index';
 
 interface VehicleTask {
   TaskID: string;
@@ -12,27 +12,8 @@ interface Depot {
 }
 
 const PACKAGE = 'vehicle-scheduling';
-
 const DEPOT_API   = 'http://20.207.122.201/evaluation-service/depots';
 const VEHICLE_API = 'http://20.207.122.201/evaluation-service/vehicles';
-const AUTH_URL    = 'http://20.207.122.201/evaluation-service/auth';
-
-async function getAuthToken(): Promise<string> {
-  const res = await fetch(AUTH_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      email: 'rippleskarthi@gmail.com',
-      name: 'karthikeyan s',
-      rollNo: 'ch.sc.u4cse23223',
-      accessCode: 'PTBMmQ',
-      clientID: 'e4b18748-acc9-40ec-9722-02e6a82fe9a6',
-      clientSecret: 'UEFSupjTZThxzSVw'
-    })
-  });
-  const data = await res.json();
-  return `Bearer ${data.access_token}`;
-}
 function getOptimalSchedule(tasks: VehicleTask[], budget: number) {
   const dp = new Array(budget + 1).fill(0);
   const selected = Array.from({ length: budget + 1 }, () => [] as string[]);
@@ -53,13 +34,12 @@ function getOptimalSchedule(tasks: VehicleTask[], budget: number) {
 }
 
 async function runVMS() {
+
+  const authToken = 'Bearer ' + (process.env.AUTH_TOKEN || '');
+
   await Log('backend', 'info', PACKAGE, 'Initializing Vehicle Maintenance Scheduler...');
 
   try {
-    await Log('backend', 'info', PACKAGE, 'Fetching fresh auth token');
-    const authToken = await getAuthToken();
-    await Log('backend', 'info', PACKAGE, 'Auth token acquired');
-
     await Log('backend', 'info', PACKAGE, `Fetching depots from ${DEPOT_API}`);
     const depotRes = await fetch(DEPOT_API, { headers: { 'Authorization': authToken } });
     const { depots }: { depots: Depot[] } = await depotRes.json();
