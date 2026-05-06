@@ -1,6 +1,6 @@
 # Notification System Design
 
-## Stage 1: REST API Design & Real-time Mechanism
+#### Stage 1: REST API Design & Real-time Mechanism
 
 ### Core Actions
 1. Fetch Notifications: Fetch a list of notifications (Placements, Events, Results) for the logged in user.
@@ -69,7 +69,7 @@ The frontend listens for this event and updates the local state/UI immediately, 
 
 
 
-## Stage 2: Persistent Storage & Schema Design
+#### Stage 2: Persistent Storage & Schema Design
 
 ### Database Selection
 For this notification platform I recommend to use PostgreSQL (a relational database).
@@ -144,7 +144,7 @@ GROUP BY notification_type;
 
 
 
-## Stage 3: Query Performance & Optimization
+#### Stage 3: Query Performance & Optimization
 
 ### Query Analysis
 The developer wrote the following query:
@@ -173,4 +173,24 @@ WHERE notification_type = 'Placement'
   AND created_at >= NOW() - INTERVAL 7 DAY;
 notification_type accepts enum values: 'Event', 'Result', 'Placement'.
 ```
+
+---
+
+#### Stage 4: DB Overload on Notification Fetch
+
+## The Problem
+If 50,000 students load a page, they each send out a new SELECT request to retrieve notifications. The DB connection pool runs out of resources, latency increases and it all falls apart. The problem at hand: Data is being queried again and again which has not changed.
+## Solutions
+1. Redis Caching
+Cache each student's notifications when first loaded. Subsequent loads hit Redis, not the DB.
+We have sub-millisecond reads, DB load is reduced significantly but at the same time we have the problem of — Cache invalidation is not so easy — every write requires a sync of the cache as well.
+2. WebSockets 
+Already proposed in Stage 1. Tell me at start-up whether or not the notification is on; push deltas to me from the server. There are no DB calls needed for page navigation.
+Avoids the fetch-on-load pattern completely.but 50k open socket connections take up a lot of memory. Requires Redis pub/sub for scaling across multiple instances of Redis.
+3. Read Replicas
+Send all SELECT statements to the read replicas, and maintain writes on the primary.
+The capacity is measured upward from the bottom, so you can use the horizontal scale to read the capacity, and this does not require any changes to the code; however, Replication lag — a student who marks a notification as read may, for a short time, see it as unread again on the next load, due to the horizontal scale.
+
+### Conclusion
+The ideal solution is to use all three: Redis for most reads, WebSockets for live updates meaning that the frontend never has to re-fetch, read replicas for misses in Redis's cache. The primary DB becomes read-only in steady state and that's because it should be, since it's the only one accessible to write operations.
 
