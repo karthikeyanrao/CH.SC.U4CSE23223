@@ -194,3 +194,85 @@ The capacity is measured upward from the bottom, so you can use the horizontal s
 ### Conclusion
 The ideal solution is to use all three: Redis for most reads, WebSockets for live updates meaning that the frontend never has to re-fetch, read replicas for misses in Redis's cache. The primary DB becomes read-only in steady state and that's because it should be, since it's the only one accessible to write operations.
 
+---
+
+#### Stage 5: High-Volume Notifications (Notify All)
+
+## Shortcomings of the Proposed Implementation
+1. Synchronous & Blocking. For loop executes sequentially on the server thread that is handling the HR's request. Taking many minutes to process 50,000 students means that the HTTP request will time out, and the HR won't know what happened.
+2. No Fault Tolerance, Resumability. If the process crashes or the email API fails at student ERROR 200, then the remaining 49,800 students get nothing. Most importantly, no state tracking is done — rerunning the function would involve sending duplicate notifications to the first 200 students, but wouldn't ensure that they are completed.
+3. Database Contention. During the broadcast, 50,000 individual INSERT statements in a tight loop will fill the DB connection pool, and negatively impact performance across the platform.
+4. External API Rate Limits. If 50,000 email API calls are made without any throttling, they'll reach the rate limits or be classified as spam on the sender's domain.
+
+What you can do with failed emails? 
+With the original version, the answer is: No clean recovery will be possible. You do not know who passed or failed, so you will need to re-send to all 50,000 (which causes duplication) or you will lose the 200. This is the fundamental problem with a synchronous and stateless design.The solution is to keep a record of the delivery state per student per channel in the DB prior to attempting delivery, and then match up the failures with that record.
+The notifications table holds all notifications that are not expired.The notifications table contains all notifications that are not expired, with the information: (student_id, channel, status, retried_at, attempt_count)
+statuses: pending -> sent | failed
+This allows re-running to be safe and idempotent, only rerunning on rows that are 'failed' and have an attempt_count less than MAX_RETRIES.
+If DB Saving and Email Sending occur simultaneously?
+No — they need to be separated, on two separate grounds:
+Latency mismatch. A DB INSERT takes ~2ms. It takes 200-500ms to make an external email API call. When they are coupled, they are used to slow down the operation gates everything. This difference is 25 seconds at 50,000 students vs ~7 hours for sequential execution.Independent failure domains. If there is a problem with the email provider, it should not be fatal to in-app notifications or to persisting the notification record. Failure or success should be independent for each delivery channel. The email delivery is a byproduct of the source of truth being the DB write.
+The cartridge is now re-designed to be fan-out, and it is asynchronous, with the input being a queue.
+
+The redesign will involve three steps:
+Instant API acknowledgment — the endpoint pushes batches to a queue and immediately returns a response that contains 202 Accepted.
+Execute batch workers — receive messages from queue, process them and push to WebSocket in parallel.
+Per student email queue — failures in the email API will not impact the DB or WebSocket layers because of separating email into its own queue. Persistent failures are handled by retries that back off exponentially and use a Dead Letter Queue.
+
+### Pseudocode
+
+```python
+
+function notify_all_api(student_ids: array, message: string) -> HTTP 202:
+    job_id = generate_uuid()
+    create_broadcast_job(job_id, total=len(student_ids), status="in_progress")
+    for chunk in split_into_chunks(student_ids, BATCH_SIZE):
+        MessageQueue.publish("notification_batch_queue", {
+            job_id:  job_id,
+            ids:     chunk,
+            message: message
+        })
+    return { job_id: job_id, status: "broadcast_initiated" }
+
+function process_notification_batch(task):
+    ids     = task.ids
+    message = task.message
+    job_id  = task.job_id
+    bulk_upsert_notifications(ids, job_id, message, status="pending")
+    active_ids = filter_active_sessions(ids)
+    bulk_push_to_websocket(active_ids, message)
+    for student_id in ids:
+        MessageQueue.publish("email_job_queue", {
+            student_id: student_id,
+            job_id:     job_id,
+            message:    message,
+            attempt:    1
+        })
+    update_broadcast_job_progress(job_id, processed=len(ids))
+
+function process_email_job(task):
+    try:
+        send_email(task.student_id, task.message)
+        mark_notification(task.student_id, task.job_id, channel="email", status="sent")
+
+    except EmailAPIError as e:
+        if task.attempt < MAX_RETRIES:
+            delay = BACKOFF_BASE ** task.attempt     # 2s, 4s, 8s
+            MessageQueue.publish_delayed("email_job_queue", {
+                ...task,
+                attempt: task.attempt + 1
+            }, delay_seconds=delay)
+        else:
+            mark_notification(task.student_id, task.job_id, channel="email", status="failed")
+            DeadLetterQueue.publish("email_dlq", {
+                student_id: task.student_id,
+                job_id:     task.job_id,
+                error:      e.message,
+                final_attempt: task.attempt
+            })
+
+function process_dlq_entry(entry):
+    log_failed_delivery(entry)
+    alert_ops_team(entry)
+
+```
