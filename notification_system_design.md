@@ -3,14 +3,14 @@
 ## Stage 1: REST API Design & Real-time Mechanism
 
 ### Core Actions
-1. **Fetch Notifications**: Retrieve a list of notifications (Placements, Events, Results) for the logged-in user.
-2. **Mark as Read**: Update the status of a notification to 'read' once the user has seen it.
-3. **Unread Count**: Fetch the total number of unread notifications for the notification badge.
+1. Fetch Notifications: Fetch a list of notifications (Placements, Events, Results) for the logged in user.
+2. Flag a notification as 'Read': Change a notification status to 'read' after user has viewed it.
+3. Unread Count: Get the number of unread notifications in the notification badge.
 
 ### REST API Endpoints
 
 #### 1. GET /api/v1/notifications
-Retrieves all notifications for the authenticated student.
+- Retrieves all notifications for the authenticated student.
 - **Headers**:
   - `Authorization: Bearer <JWT_TOKEN>`
   - `Content-Type: application/json`
@@ -22,8 +22,8 @@ Retrieves all notifications for the authenticated student.
     {
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "notificationType": "Placement",
-      "title": "New Job Opportunity: Google",
-      "message": "Software Engineer (New Grad) roles are now open.",
+      "title": "New Job Opportunity: AffordMed",
+      "message": "Software Engineer roles are now open.",
       "isRead": false,
       "createdAt": "2026-05-06T14:00:00Z"
     }
@@ -61,9 +61,85 @@ Returns a summary count of unread notifications categorized by type.
   }
 }
 ```
+## Real-time Notification Mechanism
+We will use WebSockets with Socket.io to send students the updates immediately, without reloading.
+When a new notification is created in the back end (e.g., HR clicks 'Notify All), the server will send a new_notification event to the socket room of the specific student.
+The frontend listens for this event and updates the local state/UI immediately, giving a seamless "real-time" experience.
+---
 
-### Real-time Notification Mechanism
-To ensure students receive updates instantly without refreshing, we will implement **WebSockets** using **Socket.io**.
-- **Strategy**: When a new notification is generated in the backend (e.g., HR clicks "Notify All"), the server will emit a `new_notification` event to the specific student's socket room.
-- **Client Handling**: The frontend listens for this event and updates the local state/UI immediately, providing a seamless "real-time" experience.
+
+
+## Stage 2: Persistent Storage & Schema Design
+
+### Database Selection
+For this notification platform I recommend to use PostgreSQL (a relational database).
+**Why PostgreSQL?**
+1. Strict data integrity is required to make sure that no messages are lost or modified.
+2. Structured Relationships: The data is very relational.
+3. JSONB Support: PostgreSQL supports the ability to store unstructured data in a structured schema with JSONB columns.
+
+### Database Schema
+We require two main tables: students and notifications.
+
+```sql
+CREATE TABLE students (
+    student_id UUID PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE notifications (
+    notification_id UUID PRIMARY KEY,
+    student_id UUID NOT NULL REFERENCES students(student_id) ON DELETE CASCADE,
+    notification_type VARCHAR(50) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    message TEXT NOT NULL,
+    is_read BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+
+CREATE INDEX idx_notifications_student_created ON notifications(student_id, created_at DESC);
+```
+
+### Challenges with Increasing Data Volume
+Managing the growing volume of data poses significant challenges.Data growth is a challenge.
+As the platform expands to a number of millions of notifications, a number of issues will emerge:
+1. To retrieve a user's notifications, you need to scan a large table, which makes it slow.
+2. Storage Costs & Table Bloat: The table will take up a lot of disk, making backup and maintenance operations (such as `VACUUM` in Postgres) slow and resource consuming.
+3. Locking rows and slowing down concurrent operations in the database will be the result of write bottlenecks like notifying all 50,000 students.
+
+### Proposed Solutions
+1. Partition notifications table based on the time of insertion (created_at) into the table, e.g. partition monthly, so that active queries on the table are performed against a smaller data set.
+2. Archiving Strategy: Transfer notifications older than 6 months to lower cost cold storage or a separate historical database.
+Read Replicas: Send all read requests (to get notifications) to the replicas of the database, keeping the primary database for write operations only.
+
+
+
+### Queries based on Stage 1 APIs
+
+**1. Fetch Notifications (GET /api/v1/notifications)**
+```sql
+SELECT notification_id, notification_type, title, message, is_read, created_at
+FROM notifications
+WHERE student_id = $1
+ORDER BY created_at DESC
+LIMIT $4 OFFSET $2;
+```
+
+**2. Mark as Read (PATCH /api/v1/notifications/{id}/read)**
+```sql
+UPDATE notifications
+SET is_read = TRUE
+WHERE notification_id = $1 AND student_id = $2;
+```
+
+**3. Unread Count Summary (GET /api/v1/notifications/summary)**
+```sql
+SELECT notification_type, COUNT(*) as count
+FROM notifications
+WHERE student_id = $1 AND is_read = FALSE
+GROUP BY notification_type;
+```
 
