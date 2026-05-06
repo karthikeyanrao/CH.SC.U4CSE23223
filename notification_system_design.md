@@ -116,7 +116,6 @@ As the platform expands to a number of millions of notifications, a number of is
 Read Replicas: Send all read requests (to get notifications) to the replicas of the database, keeping the primary database for write operations only.
 
 
-
 ### Queries based on Stage 1 APIs
 
 **1. Fetch Notifications (GET /api/v1/notifications)**
@@ -141,5 +140,37 @@ SELECT notification_type, COUNT(*) as count
 FROM notifications
 WHERE student_id = $1 AND is_read = FALSE
 GROUP BY notification_type;
+```
+
+
+
+## Stage 3: Query Performance & Optimization
+
+### Query Analysis
+The developer wrote the following query:
+`SELECT * FROM notifications WHERE studentlD = l042 AND isRead = false ORDER BY createdAt DESC;`
+
+### Is the query accurate?
+Yes, logically correct but SELECT * fetches unnecessary large columns like message.
+It is Slow because it need to read 50000 rows and to check the student 1042 message that have unread messages it will check the full table whuch have O(n) Time Complexitity and the In Memory Filesort - OrderBY createat with no index support & SELECT * — fetches all columns including large text fields
+
+### What to change?
+```sql
+CREATE INDEX idx_student_unread_time 
+ON notifications(student_id, is_read, created_at DESC);
+```
+
+Only use the necessary columns in the query. An O(N) full scan becomes an O(log N) B-tree lookup when the results are pre-sorted. Query time: seconds → milliseconds.
+
+## Should you index every column?
+I suggest as No . All indexes will need to be updated on each INSERT/UPDATE/DELETE, which will result in write slowdowns when sending the bulk data. The only thing that low cardinality columns like is_read (2 values) or notification_type (3 values) provide by themselves is a tiny bit of performance. Only indexes based on true query patterns.
+Students notified with a Placement notification within the past 7 days
+
+### Query to find all student who got placement notification 
+```SQL
+SELECT DISTINCT student_id FROM notifications
+WHERE notification_type = 'Placement'
+  AND created_at >= NOW() - INTERVAL 7 DAY;
+notification_type accepts enum values: 'Event', 'Result', 'Placement'.
 ```
 
